@@ -782,9 +782,14 @@ endmodule
     //================================  
     class src_config extends uvm_object;
       `uvm_object_utils(src_config)
+
       int no_src_agent;
+
       int mistry_number;
+
       uvm_active_passive_enum is_active;
+
+      virtual router_if vif;
       function new(string name ="src_config");
         super.new(name);
       endfunction //new()
@@ -800,11 +805,53 @@ endmodule
 
     class src_xtn extends uvm_sequence_item;
         `uvm_object_utils(src_xtn)
+
+    rand bit [7:0]header;		
+	rand bit [7:0]PL[];
+	rand bit [7:0]parity;
+	bit error,busy;
+
+    constraint limit  {header[1:0]!=3;}
+	constraint limit1 {PL.size==header[7:2];}
+	constraint limit2 {PL.size  inside{[1:64]};}
+    extern function void do_print (uvm_printer printer);
+
         function new(string name ="src_xtn");
             super.new(name);
         endfunction //new()
+
+
+        function void post_randomize();
+            parity= header^0;
+            foreach(PL[i])
+                parity = parity ^PL[i];
+        endfunction
+
+
     endclass 
 
+    function void  src_xtn::do_print (uvm_printer printer);
+        super.do_print(printer);
+    
+       
+        //              	srting name   		bitstream value     size    radix for printing
+        printer.print_field( "header", this.header,	UVM_DEC	);
+        printer.print_field( "address is ", this.header[1:0], UVM_DEC	);
+        foreach(PL[i])
+    begin
+      //  printer.print_field( "busy ", this.busy, UVM_DEC	);
+           printer.print_field( $sformatf("payload[%0d]",i),this.PL[i],UVM_DEC);
+    end
+        printer.print_field( "parity", this.parity, UVM_DEC	);
+        printer.print_field( "busy ", this.busy, UVM_DEC	);
+        
+        //printer.print_field( "xtn_delay", 		this.xtn_delay,     65,		 UVM_DEC		);
+       
+        //  	         	   variable name	xtn_type		$bits(variable name) 	variable name.name
+       // printer.print_generic( "xtn_type", 		"addr_t",		$bits(xtn_type),		xtn_type.name);
+    
+    endfunction:do_print
+    
 
     //================================
     //================================                                               sequence
@@ -816,16 +863,104 @@ endmodule
         endfunction //new()
     endclass //src_seq extends superClass
 
+class router_rand_sseqs extends src_seq;
+`uvm_object_utils(router_rand_sseqs)
+extern function new(string name="router_rand_sseqs");
+extern task body();
+endclass
+
+//-------------------------------------------
+function router_rand_sseqs::new(string name="router_rand_sseqs");
+	super.new(name);
+endfunction
+
+task router_rand_sseqs::body();
+	repeat(4)
+		begin
+			req = router_src_xtn::type_id::create("req");
+			start_item(req);
+			assert(req.randomize()with {header[1:0]==2'b00;});
+			finish_item(req);
+		end
+endtask
+
 
     //================================
     //================================                                                 monitor
     //================================
     class src_monitor extends uvm_monitor;
         `uvm_component_utils(src_monitor)
+        virtual router_if.S_MON_MP vif;
+	    src_config m_cfg;
+	    uvm_analysis_port#(src_xtn)monitor_port;
+
         function new(string name ="src_monitor",uvm_component parent);
             super.new(name,parent);
         endfunction //new()
+
+    extern function void build_phase(uvm_phase phase);
+	extern function void connect_phase(uvm_phase phase);
+	extern task run_phase(uvm_phase phase);
+	extern task collect_data();
+	extern function void report_phase(uvm_phase phase);
     endclass //src_monitor extends superClass
+
+    function void src_monitor:: build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        if(!uvm_config_db#(src_config)::get(this,"","src_config",m_cfg))
+                `uvm_fatal(get_type_name(),"configuration is failing")
+    endfunction
+
+    function void src_monitor:: connect_phase(uvm_phase phase);	
+        super.connect_phase(phase);
+        vif = m_cfg.vif;
+    endfunction
+
+
+    
+task src_monitor::collect_data();
+    src_xtn xtn;	
+    xtn = src_xtn::type_id::create("xtn");
+    @(vif.s_mon_cb);
+    while(vif.s_mon_cb.busy)	
+        @(vif.s_mon_cb);
+    while(vif.s_mon_cb.pkt_valid!==1)//------------it was 0
+        @(vif.s_mon_cb);
+    xtn.header =vif.s_mon_cb.data_in;
+        @(vif.s_mon_cb);		
+    xtn.PL = new[xtn.header[7:2]];
+    foreach(xtn.PL[i])
+        begin
+            while(vif.s_mon_cb.busy)	
+                @(vif.s_mon_cb);
+            xtn.PL[i]= vif.s_mon_cb.data_in;
+            @(vif.s_mon_cb);		
+        end	
+    while(vif.s_mon_cb.busy)	
+                @(vif.s_mon_cb);
+
+    while(vif.s_mon_cb.pkt_valid)
+        @(vif.s_mon_cb);
+    xtn.parity= vif.s_mon_cb.data_in;
+        @(vif.s_mon_cb);
+
+//	`uvm_info(get_type_name(),$sformatf("printing from monitor \n %s", xtn.sprint()),UVM_LOW) 
+endtask
+
+
+task src_monitor::run_phase(uvm_phase phase);
+    super.run_phase(phase);
+    forever collect_data();
+endtask
+
+
+function void router_src_monitor::report_phase(uvm_phase phase);
+	//-------------------------------------------------------	`uvm_info(get_type_name(),"report phae",UVM_NONE);
+endfunction
+
+
+
+
 
 
     //================================
@@ -833,13 +968,80 @@ endmodule
     //================================
     class src_driver extends uvm_driver #(src_xtn);
         `uvm_component_utils(src_driver)
+        virtual router_if.S_DR_MP vif;
+        src_config m_cfg;
+
         function new(string name ="src_driver",uvm_component parent);
             super.new(name,parent);
         endfunction //new()
+
+    extern function void build_phase(uvm_phase phase);
+	extern function void connect_phase(uvm_phase phase);
+	extern task run_phase(uvm_phase phase);
+	extern task send_to_data(router_src_xtn xtn);
+	extern function void report_phase(uvm_phase phase);
+
     endclass //src_driver
 
+    function void src_driver:: build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        if(!uvm_config_db#(src_config)::get(this,"","src_config",m_cfg))
+                `uvm_fatal(get_type_name(),"configuration is failing")
+    endfunction
+
+    function void src_driver::connect_phase(uvm_phase phase);
+        super.connect_phase(phase);
+        vif = m_cfg.vif;        
+    endfunction
+
+    task src_driver::send_to_data(src_xtn xtn);
+        `uvm_info(get_type_name(),$sformatf("printing from src driver \n %s", xtn.sprint()),UVM_LOW) 
+ 
+         @(vif.s_dr_cb)
+         while(vif.s_dr_cb.busy)
+             @(vif.s_dr_cb);
+         vif.s_dr_cb.pkt_valid<=1'b1;//------------------------ it was 0
+         vif.s_dr_cb.data_in<=xtn.header;
+             @(vif.s_dr_cb);
+         foreach(xtn.PL[i])
+             begin
+                 while(vif.s_dr_cb.busy)
+                     @(vif.s_dr_cb);
+                 vif.s_dr_cb.data_in<=xtn.PL[i];
+                     @(vif.s_dr_cb);				
+             end	
+             while(vif.s_dr_cb.busy)
+                 @(vif.s_dr_cb);
+             vif.s_dr_cb.pkt_valid<=1'b0;
+             vif.s_dr_cb.data_in<=xtn.parity;
+             repeat(2)
+                 @(vif.s_dr_cb);
+             xtn.error = vif.s_dr_cb.err;
+ endtask
+
+ task src_driver::run_phase(uvm_phase phase);
+	super.run_phase(phase);
+	@(vif.s_dr_cb)
+		vif.s_dr_cb.resetn<=1'b0;
+	@(vif.s_dr_cb)
+		vif.s_dr_cb.resetn<=1'b1;
+		forever
+			begin	
+				seq_item_port.get_next_item(req);
+				send_to_data(req);
+				seq_item_port.item_done();
+			end
+
+endtask
+
+function void src_driver::report_phase(uvm_phase phase);
+    //-------------------------------	`uvm_info(get_type_name(),"report phase",UVM_NONE);
+    endfunction
 
 
+
+
+    
     //================================
     //================================                                                            sequencer
     //================================
@@ -850,6 +1052,8 @@ endmodule
         endfunction //new()
     endclass //src_driver
 
+
+
     //================================
     //================================                                                        src_agent
     //================================
@@ -858,17 +1062,45 @@ endmodule
         src_driver     sdrvh;
         src_monitor    smonh;
         src_sequencer sseqrh;
-        function new(string name ="src_agent",uvm_component parent);
-            super.new(name,parent);
-        endfunction //new()
+        router_src_config m_cfg;
 
-        function void build_phase(uvm_phase phase);
-            super.build_phase(phase);
-            sdrvh = src_driver::type_id::create("sdrvh",this);
-            smonh = src_monitor::type_id::create("smonh",this);
-            sseqrh = src_sequencer::type_id::create("sseqrh",this);
-        endfunction
+
+    extern function new(string name = "src_agent",uvm_component parent);
+	extern function void build_phase (uvm_phase phase);
+	extern function void connect_phase(uvm_phase phase);
+
+       
     endclass //src_agent extends superClass
+
+    function src_agent::new(string name = "src_agent",uvm_component parent);
+        super.new(name, parent);
+    endfunction
+    
+    function void src_agent::build_phase(uvm_phase phase);
+    
+        super.build_phase(phase);
+       // get the config object using uvm_config_db
+        if(!uvm_config_db #(src_config)::get(this,"","src_config",m_cfg))
+            `uvm_fatal("CONFIG","cannot get() m_cfg from uvm_config_db. Have you set() it?") 
+        smonh=src_monitor::type_id::create("smonh",this);	
+        if(m_cfg.is_active==UVM_ACTIVE)
+            begin
+                sdrvh=src_driver::type_id::create("sdrvh",this);
+                sseqrh=src_sequencer::type_id::create("sseqrh",this);
+            end
+            
+    endfunction
+    
+    function void src_agent::connect_phase(uvm_phase phase);
+        if(m_cfg.is_active==UVM_ACTIVE)
+            begin
+                sdrvh.seq_item_port.connect(sseqrh.seq_item_export);
+              end
+    endfunction
+
+
+
+
 
 
     //================================
@@ -878,24 +1110,36 @@ endmodule
         `uvm_component_utils(src_agent_top)
         int no_src_agent;
         src_agent src_agh[];
-        function new(string name ="src_agent_top",uvm_component parent);
-            super.new(name,parent);
-        endfunction //new()
+        src_config s_cfg[];
+        router_env_config m_cfg;
 
-        function void build_phase(uvm_phase phase);
-            super.build_phase(phase);
-
-            if(! uvm_config_db#(int)::get(this, "", "no_src_agent", no_src_agent))
-            `uvm_fatal(get_name(), "failinf no of dst agt")
-            
-            src_agh = new[no_src_agent];
-            foreach (src_agh[i]) 
-            begin
-                src_agh[i] = src_agent::type_id::create($sformatf("src_agh[%0d]",i),this);
-            end
-
-        endfunction
+    extern function new(string name ="router_src_agent_top",uvm_component parent);
+	extern function void build_phase(uvm_phase phase);
+	extern task run_phase(uvm_phase phase);
     endclass //src_agent extends superClass
+
+    function src_agent_top::new(string name="router_src_agent_top",uvm_component parent);
+        super.new(name,parent);
+    endfunction
+
+    function void src_agent_top::build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        if(!uvm_config_db #(env_config)::get(this,"","env_config",m_cfg))
+            `uvm_fatal("AGT_TOP","cannot get config data");
+    
+        src_agh = new[m_cfg.no_of_src_agt];
+        s_cfg = new[m_cfg.no_of_src_agt];
+        foreach(sagth[i])
+        begin
+            s_cfg[i]=m_cfg.m_src_cfg[i];
+            src_agh[i] = router_src_agent::type_id::create($sformatf("src_agh[%0d]",i),this);
+        //	uvm_config_db#(router_src_config)::set(this,$sformatf("s_cfg[%0d]*",i),"rd_config",s_cfg[i]);
+            uvm_config_db#(src_config)::set(this,"*","src_config",s_cfg[i]);
+        
+        end
+        
+    endfunction
+
 
 
 
